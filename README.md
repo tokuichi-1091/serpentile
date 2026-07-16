@@ -77,5 +77,7 @@ h1.t18.dygdygdygfo0fo0fo0gdygdygdy0fo0fo0foygdygdygdo0fo0fo0fdygdygdygfo0fo0fo0g
 
 ## 謝辞
 
-この探究は Claude (Anthropic) との対話の中で、シミュレーション・予想・証明を行き来しながら進めました。発端をくれたのは、どこかの街の舗装と、serpentileのwikipedia記事の日本語版を作ってくれたTwitterの有識者のツイート(https://x.com/skytomo221/status/2061770707953189283)です。
+この探究は Claude (Anthropic) との対話の中で、シミュレーション・予想・証明を行き来しながら進めました。
+
+発端をくれたのは、どこかの街の舗装と、serpentileのwikipedia記事の日本語版を作ってくれたTwitterの有識者のツイート( https://x.com/skytomo221/status/2061770707953189283 )です。
 
