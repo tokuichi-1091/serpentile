@@ -69,11 +69,6 @@ h1.t18.dygdygdygfo0fo0fo0gdygdygdy0fo0fo0foygdygdygdo0fo0fo0fdygdygdygfo0fo0fo0g
 
 作り方も単純で、向きの行モチーフ A = [2,1,5,4,2,4](偶数行)と B = [2,3,4,0,0,0](奇数行)を、2行ごとに2マス斜めにずらして敷くだけです。
 
-## 公開方法
-
-1. このリポジトリの `index.html` がシミュレータ本体です(単一ファイル・依存なし)
-2. Settings → Pages → Branch を `main` / root に設定
-3. 数分後に `https://<username>.github.io/serpentile/` で公開されます
 
 ## 謝辞
 
