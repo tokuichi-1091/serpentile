@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>六角タイル柄シミュレーター(紐表現・編集対応版)</title>
+<style>
+:root{
+  --color-text-primary:#2C2C2A;--color-text-secondary:#5F5E5A;--color-text-tertiary:#8A8884;
+  --color-background-main:#FAF9F5;--color-background-secondary:#F0EEE6;
+  --color-border-secondary:rgba(128,128,128,.3);--border-radius-md:10px;
+}
+body{font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;background:var(--color-background-main);color:var(--color-text-primary);margin:0;padding:14px;}
+button{font:inherit;padding:6px 14px;border:1px solid var(--color-border-secondary);border-radius:8px;background:#fff;cursor:pointer;}
+button:active{background:var(--color-background-secondary);}
+select,input[type=range]{font:inherit;}
+input[type=text]{border:1px solid var(--color-border-secondary);border-radius:8px;padding:5px 8px;font:inherit;}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);}
+.ctl{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:0 0 .7rem;}
+.ctl label{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--color-text-secondary);}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:1rem 0;}
+.card{background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:.8rem 1rem;}
+.card .l{font-size:13px;color:var(--color-text-secondary);margin:0 0 4px;}
+.card .v{font-size:22px;font-weight:500;color:var(--color-text-primary);margin:0;}
+.card .s{font-size:12px;color:var(--color-text-tertiary);margin:2px 0 0;}
+</style>
+</head>
+<body>
+<h2 class="sr-only">正六角形タイルの柄(紐表現)をランダム回転で敷き詰め、柄が囲む領域やループ構造を表示する対話的シミュレーター。平面窓とトーラスの切替、タイルの手動回転編集、盤面コードによる状態の保存・復元に対応</h2>
+<div class="ctl">
+  <button id="re">↻ 再生成</button>
+  <label>シード <input type="text" id="seedin" inputmode="numeric" style="width:110px;"></label>
+  <label>表示
+    <select id="mode">
+      <option value="faces" selected>囲まれた領域を塗る</option>
+      <option value="loops">ループごとに色分け</option>
+      <option value="lines">紐のみ</option>
+    </select>
+  </label>
+  <label style="flex:1;min-width:180px;">範囲
+    <input type="range" id="rad" min="5" max="12" step="1" value="8" style="flex:1;">
+    <span id="radout" style="font-weight:500;min-width:20px;">8</span>
+  </label>
+</div>
+<div class="ctl">
+  <label><input type="checkbox" id="grid" checked> 六角形の枠</label>
+  <label><input type="checkbox" id="round" checked> 角を丸める(表示のみ)</label>
+  <label><input type="checkbox" id="torus"> トーラス(対辺を接続)</label>
+  <label><input type="checkbox" id="edit"> 編集モード(タップで時計回りに回転)</label>
+</div>
+<div class="ctl">
+  <label style="flex:1;">盤面コード <input type="text" id="code" spellcheck="false" style="flex:1;min-width:200px;font-family:ui-monospace,monospace;font-size:12px;"></label>
+</div>
+<canvas id="cv" style="width:100%;display:block;"></canvas>
+<div id="legend" style="display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:var(--color-text-secondary);margin:8px 0 0;"></div>
+<p id="pick" style="font-size:14px;color:var(--color-text-secondary);margin:8px 0 0;min-height:1.4em;"></p>
+<div class="cards" id="cards"></div>
+<canvas id="hist" style="width:100%;display:block;height:170px;"></canvas>
+<script>
+const S3=Math.sqrt(3), UNIT=S3/16, RR=0.22;
+const cssv=(n,fb)=>{const v=getComputedStyle(document.body).getPropertyValue(n).trim();return v||fb;};
+let state={R:8,seed:Math.floor(Math.random()*1e9),mode:'faces',grid:true,round:true,torus:false,edit:false};
+let world=null, picked=null, selLoop=null;
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function shoelace(p){let s=0;for(let i=0;i<p.length;i++){const a=p[i],b=p[(i+1)%p.length];s+=a.x*b.y-b.x*a.y;}return s/2;}
+function toSeed(s){
+  s=String(s).trim();
+  if(/^-?\d+$/.test(s))return parseInt(s,10)|0;
+  let h=2166136261;
+  for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}
+  return h|0;
+}
+function torusN(R){return Math.max(6,Math.round(Math.sqrt(3*R*R+3*R+1)));}
+function planeTileCount(R){return 3*R*R+3*R+1;}
+
+/* ── 向き列の生成(セル走査順はbuildと同一) ── */
+function genKs(){
+  const rnd=mulberry32(state.seed);
+  const ks=[];
+  if(state.torus){
+    const N=torusN(state.R);
+    for(let i=0;i<N*N;i++)ks.push(Math.floor(rnd()*6));
+  }else{
+    const R=state.R;
+    for(let q=-R;q<=R;q++)for(let r=-R;r<=R;r++){
+      if(Math.abs(q+r)>R)continue;
+      ks.push(Math.floor(rnd()*6));
+    }
+  }
+  return ks;
+}
+
+/* ── 盤面コード: h1.<p|t><サイズ>.<向き列> (2タイル/文字、端数は拡張文字) ── */
+const CODE_AB='0123456789abcdefghijklmnopqrstuvwxyzABCDEF';
+function encodeBoard(){
+  const type=world.torus?'t':'p', size=world.torus?world.N:world.R;
+  const ks=world.ks;let d='';
+  for(let i=0;i+1<ks.length;i+=2)d+=CODE_AB[ks[i]*6+ks[i+1]];
+  if(ks.length%2)d+=CODE_AB[36+ks[ks.length-1]];
+  return 'h1.'+type+size+'.'+d;
+}
+function decodeBoard(str){
+  const m=/^h1\.([pt])(\d+)\.([0-9a-zA-F]+)$/.exec(String(str).trim());
+  if(!m)return null;
+  const type=m[1], size=parseInt(m[2],10), data=m[3];
+  const ks=[];
+  for(const ch of data){
+    const v=CODE_AB.indexOf(ch);
+    if(v<0)return null;
+    if(v<36){ks.push((v/6)|0,v%6);}else{ks.push(v-36);}
+  }
+  const need=type==='t'?size*size:planeTileCount(size);
+  if(ks.length!==need)return null;
+  if(type==='p'&&(size<1||size>40))return null;
+  if(type==='t'&&(size<2||size>60))return null;
+  return {torus:type==='t',size,ks};
+}
+
+/* ── 平面窓 ── */
+function buildPlane(R,ks){
+  const V=new Map();
+  function vid(x,y){const k=Math.round(x*4)+'_'+Math.round(y*4/S3);let o=V.get(k);if(!o){o={x,y,k,nb:[]};V.set(k,o);}return o;}
+  const chords=[], midinc=new Map(), tiles=[];
+  function inc(v,ci){let a=midinc.get(v.k);if(!a){a=[];midinc.set(v.k,a);}a.push(ci);}
+  let ti=0;
+  for(let q=-R;q<=R;q++)for(let r=-R;r<=R;r++){
+    if(Math.abs(q+r)>R)continue;
+    const cx=1.5*q, cy=S3*(r+q/2), k=ks[ti++];
+    tiles.push({cx,cy});
+    const m=[];
+    for(let j=0;j<6;j++){const a=(30+60*j)*Math.PI/180;m.push(vid(cx+S3/2*Math.cos(a),cy+S3/2*Math.sin(a)));}
+    const X=vid(cx+0.5*Math.cos(k*60*Math.PI/180),cy+0.5*Math.sin(k*60*Math.PI/180));
+    const A1=m[k%6],A2=m[(k+4)%6],B1=m[(k+1)%6],B2=m[(k+5)%6],C1=m[(k+2)%6],C2=m[(k+3)%6];
+    [[A1,X],[X,A2],[B1,X],[X,B2],[C1,C2]].forEach(([u,v])=>{u.nb.push(v);v.nb.push(u);});
+    [[A1,A2,'A'],[B1,B2,'B'],[C1,C2,'C']].forEach(([a,b,t])=>{const ci=chords.length;chords.push({a,b,t});inc(a,ci);inc(b,ci);});
+  }
+  chords.forEach(c=>{c.ra=c.a.nb.length===2;c.rb=c.b.nb.length===2;});
+  V.forEach(v=>{
+    v.srt=v.nb.slice().sort((p,q)=>Math.atan2(p.y-v.y,p.x-v.x)-Math.atan2(q.y-v.y,q.x-v.x));
+    v.idx=new Map();v.srt.forEach((w,i)=>v.idx.set(w.k,i));
+  });
+  const seen=new Set(), faces=[];
+  V.forEach(u=>{u.nb.forEach(v=>{
+    if(seen.has(u.k+'>'+v.k))return;
+    const cyc=[];let cu=u,cv=v;
+    while(true){const dk=cu.k+'>'+cv.k;if(seen.has(dk))break;seen.add(dk);cyc.push(cu);
+      const i=cv.idx.get(cu.k);const w=cv.srt[(i-1+cv.srt.length)%cv.srt.length];cu=cv;cv=w;}
+    faces.push(cyc);
+  });});
+  const L=1.5*R-2.5, valid=[];
+  for(const f of faces){
+    if(f.some(v=>v.nb.length<2))continue;
+    const a=Math.abs(shoelace(f));
+    if(a<1e-9)continue;
+    if(f.some(v=>v.x*v.x+v.y*v.y>L*L))continue;
+    valid.push({pts:f,units:Math.round(a/UNIT)});
+  }
+  const lid=new Array(chords.length).fill(-1), loops=[];
+  for(let s=0;s<chords.length;s++){
+    if(lid[s]>=0)continue;
+    const members=[s];let pts=[chords[s].a,chords[s].b];let closed=false;
+    let cur=s,ex=chords[s].b;
+    while(true){const ic=(midinc.get(ex.k)||[]).filter(c=>c!==cur);if(!ic.length)break;
+      const nx=ic[0];if(nx===s){closed=true;break;}
+      const ch=chords[nx];const o=ch.a===ex?ch.b:ch.a;members.push(nx);pts.push(o);cur=nx;ex=o;}
+    if(!closed){cur=s;ex=chords[s].a;
+      while(true){const ic=(midinc.get(ex.k)||[]).filter(c=>c!==cur);if(!ic.length)break;
+        const nx=ic[0];const ch=chords[nx];const o=ch.a===ex?ch.b:ch.a;members.push(nx);pts.unshift(o);cur=nx;ex=o;}}
+    const id=loops.length;members.forEach(c=>lid[c]=id);
+    const lp={closed,pts,n:members.length,wind:[0,0]};
+    if(closed)lp.sunits=Math.round(shoelace(pts)/UNIT);
+    loops.push(lp);
+  }
+  const ext=1.5*R+1.1;
+  return {torus:false,R,ks,chords,valid,loops,tiles,lid,extX:ext,extY:ext};
+}
+
+/* ── トーラス(N×N 菱形領域、対辺接続) ── */
+function buildTorus(N,ks){
+  const DIR=[[1,0],[0,1],[-1,1],[-1,0],[0,-1],[1,-1]];
+  const wrap=v=>((v%N)+N)%N;
+  const ox=0.75*(N-1), oy=S3*0.75*(N-1);
+  const mkey=(q,r,j)=>{
+    const q2=wrap(q+DIR[j][0]), r2=wrap(r+DIR[j][1]), j2=(j+3)%6;
+    const a=q+'_'+r+'_'+j, b=q2+'_'+r2+'_'+j2;
+    return a<b?a:b;
+  };
+  const chords=[], midinc=new Map(), tiles=[];
+  function inc(k,ci){let a=midinc.get(k);if(!a){a=[];midinc.set(k,a);}a.push(ci);}
+  for(let q=0;q<N;q++)for(let r=0;r<N;r++){
+    const cx=1.5*q-ox, cy=S3*(r+q/2)-oy, k=ks[q*N+r];
+    tiles.push({cx,cy});
+    const mp=[],mk=[],seam=[];
+    for(let j=0;j<6;j++){
+      const a=(30+60*j)*Math.PI/180;
+      mp.push({x:cx+S3/2*Math.cos(a),y:cy+S3/2*Math.sin(a)});
+      mk.push(mkey(q,r,j));
+      const nq=q+DIR[j][0], nr=r+DIR[j][1];
+      seam.push(nq<0||nq>=N||nr<0||nr>=N);
+    }
+    [[k%6,(k+4)%6,'A'],[(k+1)%6,(k+5)%6,'B'],[(k+2)%6,(k+3)%6,'C']].forEach(([i1,i2,t])=>{
+      const ci=chords.length;
+      chords.push({a:{x:mp[i1].x,y:mp[i1].y,k:mk[i1]},b:{x:mp[i2].x,y:mp[i2].y,k:mk[i2]},
+                   t,tq:q,tr:r,ea:i1,eb:i2,ra:!seam[i1],rb:!seam[i2]});
+      inc(mk[i1],ci);inc(mk[i2],ci);
+    });
+  }
+  const shift=(p,oq,or)=>({x:p.x+1.5*oq,y:p.y+S3*(or+oq/2)});
+  const lid=new Array(chords.length).fill(-1), loops=[];
+  for(let s=0;s<chords.length;s++){
+    if(lid[s]>=0)continue;
+    const members=[s];
+    let uq=chords[s].tq, ur=chords[s].tr;
+    let pts=[shift(chords[s].a,0,0),shift(chords[s].b,0,0)];
+    let cur=s, ex=chords[s].b.k;
+    while(true){
+      const c=chords[cur];
+      const e=(c.b.k===ex)?c.eb:c.ea;
+      uq+=DIR[e][0];ur+=DIR[e][1];
+      const ic=(midinc.get(ex)||[]).filter(x=>x!==cur);
+      if(!ic.length)break;
+      const nx=ic[0];
+      if(nx===s)break;
+      const ch=chords[nx];
+      const oEnd=(ch.a.k===ex)?ch.b:ch.a;
+      members.push(nx);
+      pts.push(shift(oEnd,uq-ch.tq,ur-ch.tr));
+      cur=nx;ex=oEnd.k;
+    }
+    const id=loops.length;members.forEach(c=>lid[c]=id);
+    const wq=Math.round((uq-chords[s].tq)/N), wr=Math.round((ur-chords[s].tr)/N);
+    const lp={closed:true,pts,n:members.length,wind:[wq,wr]};
+    if(wq===0&&wr===0)lp.sunits=Math.round(shoelace(pts)/UNIT);
+    loops.push(lp);
+  }
+  const extX=0.75*(N-1)+1.6, extY=S3*0.75*(N-1)+1.6;
+  return {torus:true,N,ks,chords,valid:[],loops,tiles,lid,extX,extY};
+}
+
+function buildWorld(ks){
+  return state.torus?buildTorus(torusN(state.R),ks):buildPlane(state.R,ks);
+}
+
+function faceColor(n){
+  if(n<6)return '#E1F5EE';
+  if(n<12)return '#9FE1CB';
+  if(n<24)return '#5DCAA5';
+  if(n<48)return '#AFA9EC';
+  if(n<96)return '#7F77DD';
+  return '#534AB7';
+}
+const loopPal=['#7F77DD','#1D9E75','#D85A30','#D4537E','#378ADD','#97C459','#EF9F27'];
+const unit2=(p,q)=>{const dx=q.x-p.x,dy=q.y-p.y,l=Math.hypot(dx,dy);return{x:dx/l,y:dy/l};};
+
+function facePath(ctx,pts,T){
+  const n=pts.length;let first=true;
+  for(let i=0;i<n;i++){
+    const v=pts[i],p=pts[(i-1+n)%n],nx=pts[(i+1)%n];
+    if(state.round&&v.nb&&v.nb.length===2){
+      const up=unit2(v,p),un=unit2(v,nx);
+      const d1=Math.min(RR,Math.hypot(p.x-v.x,p.y-v.y)/2),d2=Math.min(RR,Math.hypot(nx.x-v.x,nx.y-v.y)/2);
+      const[a1,b1]=T({x:v.x+up.x*d1,y:v.y+up.y*d1});
+      const[cx,cy]=T(v);
+      const[a2,b2]=T({x:v.x+un.x*d2,y:v.y+un.y*d2});
+      if(first){ctx.moveTo(a1,b1);first=false;}else ctx.lineTo(a1,b1);
+      ctx.quadraticCurveTo(cx,cy,a2,b2);
+    }else{
+      const[x,y]=T(v);
+      if(first){ctx.moveTo(x,y);first=false;}else ctx.lineTo(x,y);
+    }
+  }
+  ctx.closePath();
+}
+
+function draw(){
+  const cv=document.getElementById('cv');
+  const W=cv.clientWidth||640, H=Math.round(W*0.92), dpr=window.devicePixelRatio||1;
+  cv.width=W*dpr;cv.height=H*dpr;cv.style.height=H+'px';
+  const ctx=cv.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,W,H);
+  const sc=Math.min(W/2/world.extX,H/2/world.extY);
+  const T=p=>[W/2+p.x*sc,H/2-p.y*sc];
+  const ink=cssv('--color-text-primary','#2C2C2A');
+  const bord=cssv('--color-border-secondary','rgba(128,128,128,0.35)');
+  const bg=cssv('--color-background-main','#FAF9F5');
+  const wc=Math.max(2.0,0.13*sc), wo=wc+Math.max(2.4,0.07*sc);
+  ctx.lineCap='round';ctx.lineJoin='round';
+
+  let ci=0;
+  world.loops.forEach(lp=>{lp.col=lp.closed?loopPal[ci++%loopPal.length]:'#C5C3BA';});
+  const coreCol=i=>{
+    if(state.mode!=='loops')return bg;
+    const L=world.lid[i],lp=world.loops[L];
+    if(selLoop!=null)return L===selLoop?(lp.closed?lp.col:'#D85A30'):'#E3E1D8';
+    return lp.col;
+  };
+  const coreW=i=>(state.mode==='loops'&&selLoop!=null&&world.lid[i]===selLoop)?wc*1.3:wc;
+
+  function ends(c){
+    const ua=unit2(c.a,c.b);
+    let p1={x:c.a.x,y:c.a.y},p2={x:c.b.x,y:c.b.y};
+    if(state.round){
+      if(c.ra)p1={x:c.a.x+ua.x*RR,y:c.a.y+ua.y*RR};
+      if(c.rb)p2={x:c.b.x-ua.x*RR,y:c.b.y-ua.y*RR};
+    }
+    return[p1,p2];
+  }
+
+  if(state.mode==='faces'&&!world.torus){
+    for(const f of world.valid){
+      ctx.beginPath();facePath(ctx,f.pts,T);
+      ctx.fillStyle=faceColor(f.units);ctx.fill();
+    }
+  }
+  if(state.grid){
+    ctx.strokeStyle=bord;ctx.lineWidth=0.6;
+    for(const t of world.tiles){ctx.beginPath();
+      for(let j=0;j<6;j++){const a=j*60*Math.PI/180;const[x,y]=T({x:t.cx+Math.cos(a),y:t.cy+Math.sin(a)});j?ctx.lineTo(x,y):ctx.moveTo(x,y);}
+      ctx.closePath();ctx.stroke();}
+  }
+  for(const t of ['C','A','B']){
+    ctx.strokeStyle=ink;ctx.lineWidth=wo;ctx.beginPath();
+    world.chords.forEach(c=>{if(c.t!==t)return;
+      const[p1,p2]=ends(c);const[x1,y1]=T(p1),[x2,y2]=T(p2);ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);});
+    ctx.stroke();
+    world.chords.forEach((c,i)=>{if(c.t!==t)return;
+      ctx.strokeStyle=coreCol(i);ctx.lineWidth=coreW(i);ctx.beginPath();
+      const[p1,p2]=ends(c);const[x1,y1]=T(p1),[x2,y2]=T(p2);ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();});
+  }
+  if(state.round){
+    const corners=new Map();
+    world.chords.forEach((c,i)=>{
+      [[c.a,c.b,c.ra],[c.b,c.a,c.rb]].forEach(([v,w,rdb])=>{
+        if(!rdb)return;
+        const uu=unit2(v,w);
+        const t={x:v.x+uu.x*RR,y:v.y+uu.y*RR};
+        let o=corners.get(v.k);if(!o){o={v,items:[]};corners.set(v.k,o);}
+        o.items.push({i,t,uu});
+      });
+    });
+    const ok=o=>o.items.length===2;
+    ctx.strokeStyle=ink;ctx.lineWidth=wo;ctx.beginPath();
+    corners.forEach(o=>{if(!ok(o))return;
+      const[x1,y1]=T(o.items[0].t),[cx,cy]=T(o.v),[x2,y2]=T(o.items[1].t);
+      ctx.moveTo(x1,y1);ctx.quadraticCurveTo(cx,cy,x2,y2);});
+    ctx.stroke();
+    corners.forEach(o=>{if(!ok(o))return;
+      ctx.strokeStyle=coreCol(o.items[0].i);ctx.lineWidth=coreW(o.items[0].i);ctx.beginPath();
+      const[x1,y1]=T(o.items[0].t),[cx,cy]=T(o.v),[x2,y2]=T(o.items[1].t);
+      ctx.moveTo(x1,y1);ctx.quadraticCurveTo(cx,cy,x2,y2);ctx.stroke();});
+    const half=Math.min(wo*0.7,0.15*sc);
+    corners.forEach(o=>{if(!ok(o))return;o.items.forEach(it=>{
+      ctx.strokeStyle=coreCol(it.i);ctx.lineWidth=coreW(it.i);ctx.beginPath();
+      const[x1,y1]=T({x:it.t.x-it.uu.x*half/sc,y:it.t.y-it.uu.y*half/sc});
+      const[x2,y2]=T({x:it.t.x+it.uu.x*half/sc,y:it.t.y+it.uu.y*half/sc});
+      ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+    });});
+  }else{
+    const stub=Math.min(wo*1.3,0.3*sc);
+    world.chords.forEach((c,i)=>{
+      [[c.a,c.b],[c.b,c.a]].forEach(([v,w])=>{
+        const uu=unit2(v,w),len=Math.hypot(w.x-v.x,w.y-v.y)*sc;
+        const f=Math.min(1,stub/len);
+        ctx.strokeStyle=coreCol(i);ctx.lineWidth=coreW(i);ctx.beginPath();
+        const[x1,y1]=T(v),[x2,y2]=T({x:v.x+(w.x-v.x)*f,y:v.y+(w.y-v.y)*f});
+        ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+      });
+    });
+  }
+  if(picked&&state.mode==='faces'&&!world.torus){
+    ctx.beginPath();facePath(ctx,picked.pts,T);
+    ctx.strokeStyle='#D85A30';ctx.lineWidth=2.5;ctx.stroke();
+  }
+}
+
+function drawHist(){
+  const cv=document.getElementById('hist');
+  const W=cv.clientWidth||640, H=170, dpr=window.devicePixelRatio||1;
+  cv.width=W*dpr;cv.height=H*dpr;
+  const ctx=cv.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,W,H);
+  const muted=cssv('--color-text-secondary','#5F5E5A');
+  ctx.font='11px sans-serif';
+  const pad=8, base=H-30;
+  if(!world.torus){
+    const edges=[3,4,6,8,12,16,24,32,48,96,192,Infinity];
+    const labels=['3','4–5','6–7','8–11','12–15','16–23','24–31','32–47','48–95','96–191','192+'];
+    const bins=new Array(labels.length).fill(0);
+    for(const f of world.valid){for(let i=0;i<labels.length;i++){if(f.units>=edges[i]&&f.units<edges[i+1]){bins[i]++;break;}}}
+    const mx=Math.max(1,...bins.map(Math.sqrt));
+    const bw=(W-2*pad)/labels.length;
+    for(let i=0;i<labels.length;i++){
+      const h=Math.sqrt(bins[i])/mx*(base-26);
+      ctx.fillStyle=edges[i]>=24?'#7F77DD':'#1D9E75';
+      ctx.fillRect(pad+i*bw+3,base-h,bw-6,h);
+      ctx.fillStyle=muted;ctx.textAlign='center';
+      ctx.fillText(labels[i],pad+i*bw+bw/2,base+14);
+      if(bins[i]>0)ctx.fillText(String(bins[i]),pad+i*bw+bw/2,base-h-4);
+    }
+    const hx=pad+6*bw;
+    ctx.strokeStyle='#D85A30';ctx.setLineDash([4,3]);ctx.beginPath();ctx.moveTo(hx,12);ctx.lineTo(hx,base);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle='#D85A30';ctx.textAlign='left';ctx.fillText('六角形1枚 = 24単位',hx+5,16);
+    ctx.fillStyle=muted;ctx.textAlign='left';ctx.fillText('領域面積の分布(単位:√3⁄16·s²、高さは√スケール)',pad,16);
+  }else{
+    const edges=[2,3,5,9,17,33,65,129,257,513,Infinity];
+    const labels=['2','3–4','5–8','9–16','17–32','33–64','65–128','129–256','257–512','513+'];
+    const bc=new Array(labels.length).fill(0), bw_=new Array(labels.length).fill(0);
+    for(const lp of world.loops){
+      const windy=lp.wind[0]!==0||lp.wind[1]!==0;
+      for(let i=0;i<labels.length;i++){if(lp.n>=edges[i]&&lp.n<edges[i+1]){(windy?bw_:bc)[i]++;break;}}
+    }
+    const mx=Math.max(1,...bc.map((v,i)=>Math.sqrt(v+bw_[i])));
+    const colw=(W-2*pad)/labels.length;
+    for(let i=0;i<labels.length;i++){
+      const tot=bc[i]+bw_[i];
+      if(tot){
+        const h=Math.sqrt(tot)/mx*(base-26);
+        const hw=bw_[i]/tot*h;
+        ctx.fillStyle='#1D9E75';ctx.fillRect(pad+i*colw+3,base-h,colw-6,h-hw);
+        ctx.fillStyle='#D85A30';ctx.fillRect(pad+i*colw+3,base-hw,colw-6,hw);
+        ctx.fillStyle=muted;ctx.textAlign='center';ctx.fillText(String(tot),pad+i*colw+colw/2,base-h-4);
+      }
+      ctx.fillStyle=muted;ctx.textAlign='center';
+      ctx.fillText(labels[i],pad+i*colw+colw/2,base+14);
+    }
+    ctx.fillStyle=muted;ctx.textAlign='left';
+    ctx.fillText('閉ループ長(線分数)の分布。緑=可縮、橙=トーラスに巻き付く(高さは√スケール)',pad,16);
+  }
+}
+
+function card(l,v,s){return '<div class="card"><p class="l">'+l+'</p><p class="v">'+v+'</p>'+(s?'<p class="s">'+s+'</p>':'')+'</div>';}
+function stats(){
+  const el=document.getElementById('cards');
+  const total=world.chords.length;
+  let closedCh=0;
+  world.chords.forEach((c,i)=>{if(world.loops[world.lid[i]].closed)closedCh++;});
+  if(!world.torus){
+    const u=world.valid.map(f=>f.units), n=u.length;
+    let html=card('集計した領域数',n);
+    if(n){
+      const mean=u.reduce((a,b)=>a+b,0)/n;
+      const cnt={};u.forEach(v=>cnt[v]=(cnt[v]||0)+1);
+      let mode=u[0],mc=0;for(const k in cnt)if(cnt[k]>mc){mc=cnt[k];mode=k;}
+      html+=card('平均面積',(mean/24).toFixed(2),'六角形 = 1');
+      html+=card('最頻値',mode,'単位 (六角形 = 24)');
+      html+=card('最大',Math.max(...u),'単位');
+    }
+    html+=card('閉ループ所属率',(100*closedCh/total).toFixed(1)+'%','全'+total+'線分のうち窓内で閉じる紐に属する割合');
+    el.innerHTML=html;
+  }else{
+    const loops=world.loops, nl=loops.length;
+    let windLoops=0, windCh=0, maxn=0;
+    loops.forEach(lp=>{const w=lp.wind[0]!==0||lp.wind[1]!==0;if(w)windLoops++;if(lp.n>maxn)maxn=lp.n;});
+    world.chords.forEach((c,i)=>{const lp=world.loops[world.lid[i]];if(lp.wind[0]!==0||lp.wind[1]!==0)windCh++;});
+    let html=card('閉ループ所属率','100%','全'+total+'線分(トーラスなので開放端なし)');
+    html+=card('ループ総数',nl,'うち巻き付き '+windLoops+'本');
+    html+=card('巻き付きループ所属率',(100*windCh/total).toFixed(1)+'%','非可縮ループに属する線分の割合');
+    html+=card('最長ループ',maxn,'線分数');
+    el.innerHTML=html;
+  }
+}
+
+function legend(){
+  const el=document.getElementById('legend');
+  if(state.mode!=='faces'||world.torus){el.innerHTML='';return;}
+  const items=[['#E1F5EE','3–5'],['#9FE1CB','6–11'],['#5DCAA5','12–23'],['#AFA9EC','24–47'],['#7F77DD','48–95'],['#534AB7','96+']];
+  el.innerHTML='面積(単位): '+items.map(([c,t])=>'<span style="display:inline-flex;align-items:center;gap:4px;"><span style="width:12px;height:12px;border-radius:3px;background:'+c+';display:inline-block;"></span>'+t+'</span>').join('')+'<span>白 = 窓の外へ続く可能性のある領域</span>';
+}
+
+function pickDefault(){
+  if(state.edit)return '編集モード: ヘックスをタップすると時計回りに60°回転します';
+  return world&&world.torus
+    ?'ループモードで紐をタップすると情報を表示します。対辺は接続されており、境界で切れて見える紐は反対側に続いています'
+    :'塗りモードでは領域を、ループモードでは紐をタップすると情報を表示します(1単位 = √3⁄16·s² = 六角形の1⁄24)';
+}
+
+function refresh(){
+  document.getElementById('code').value=encodeBoard();
+  document.getElementById('mode').querySelector('option[value=faces]').disabled=world.torus;
+  document.getElementById('pick').textContent=pickDefault();
+  draw();stats();drawHist();legend();
+}
+
+function rebuild(){          // シードから生成
+  picked=null;selLoop=null;
+  if(state.torus&&state.mode==='faces'){state.mode='loops';document.getElementById('mode').value='loops';}
+  world=buildWorld(genKs());
+  document.getElementById('seedin').value=state.seed;
+  refresh();
+}
+
+function loadCode(str){      // 盤面コードから復元
+  const d=decodeBoard(str);
+  if(!d){document.getElementById('pick').textContent='盤面コードを解釈できませんでした(形式: h1.p8.… / h1.t15.…)';return;}
+  picked=null;selLoop=null;
+  state.torus=d.torus;
+  document.getElementById('torus').checked=d.torus;
+  if(d.torus){
+    let R=state.R, bestDiff=1e9;
+    for(let r=5;r<=12;r++){const diff=Math.abs(torusN(r)-d.size);if(diff<bestDiff){bestDiff=diff;R=r;}}
+    state.R=R;
+    world=buildTorus(d.size,d.ks);
+    if(state.mode==='faces'){state.mode='loops';document.getElementById('mode').value='loops';}
+  }else{
+    state.R=Math.min(12,Math.max(5,d.size));
+    world=buildPlane(d.size,d.ks);
+  }
+  document.getElementById('rad').value=state.R;
+  document.getElementById('radout').textContent=state.R;
+  document.getElementById('seedin').value='';   // シード由来ではない状態
+  refresh();
+}
+
+function editRotate(wx,wy){
+  let bi=-1,bd=1e9;
+  world.tiles.forEach((t,i)=>{const d=Math.hypot(wx-t.cx,wy-t.cy);if(d<bd){bd=d;bi=i;}});
+  if(bd>1.0)return;
+  const ks=world.ks.slice();
+  ks[bi]=(ks[bi]+5)%6;       // 時計回り60° = k → k−1
+  picked=null;selLoop=null;
+  world=world.torus?buildTorus(world.N,ks):buildPlane(world.R,ks);
+  document.getElementById('seedin').value='';   // 編集後はシードが盤面を表さない
+  refresh();
+}
+
+function distSeg(px,py,a,b){
+  const dx=b.x-a.x,dy=b.y-a.y,l2=dx*dx+dy*dy;
+  let t=l2?((px-a.x)*dx+(py-a.y)*dy)/l2:0;
+  t=Math.max(0,Math.min(1,t));
+  return Math.hypot(px-(a.x+dx*t),py-(a.y+dy*t));
+}
+
+document.getElementById('re').addEventListener('click',()=>{state.seed=Math.floor(Math.random()*1e9);rebuild();});
+document.getElementById('seedin').addEventListener('change',e=>{state.seed=toSeed(e.target.value);rebuild();});
+document.getElementById('code').addEventListener('change',e=>{loadCode(e.target.value);});
+document.getElementById('mode').addEventListener('change',e=>{state.mode=e.target.value;picked=null;selLoop=null;document.getElementById('pick').textContent=pickDefault();draw();legend();});
+document.getElementById('rad').addEventListener('input',e=>{document.getElementById('radout').textContent=e.target.value;});
+document.getElementById('rad').addEventListener('change',e=>{state.R=+e.target.value;rebuild();});
+document.getElementById('grid').addEventListener('change',e=>{state.grid=e.target.checked;draw();});
+document.getElementById('round').addEventListener('change',e=>{state.round=e.target.checked;draw();});
+document.getElementById('torus').addEventListener('change',e=>{state.torus=e.target.checked;rebuild();});
+document.getElementById('edit').addEventListener('change',e=>{state.edit=e.target.checked;document.getElementById('pick').textContent=pickDefault();});
+document.getElementById('cv').addEventListener('click',ev=>{
+  if(!world)return;
+  const cv=ev.currentTarget,rect=cv.getBoundingClientRect();
+  const W=cv.clientWidth,H=cv.clientHeight;
+  const sc=Math.min(W/2/world.extX,H/2/world.extY);
+  const wx=(ev.clientX-rect.left-W/2)/sc, wy=-(ev.clientY-rect.top-H/2)/sc;
+  if(state.edit){editRotate(wx,wy);return;}
+  const el=document.getElementById('pick');
+  if(state.mode==='faces'&&!world.torus){
+    let best=null;
+    for(const f of world.valid){
+      let inside=false;const p=f.pts;
+      for(let i=0,j=p.length-1;i<p.length;j=i++){
+        if((p[i].y>wy)!==(p[j].y>wy)&&wx<(p[j].x-p[i].x)*(wy-p[i].y)/(p[j].y-p[i].y)+p[i].x)inside=!inside;}
+      if(inside&&(!best||f.units<best.units))best=f;
+    }
+    picked=best;draw();
+    if(best){
+      el.textContent='選択した領域: '+best.units+'単位 = '+(best.units*UNIT).toFixed(3)+'(六角形の '+(best.units/24).toFixed(2)+' 枚分)';
+    }else{el.textContent='この場所は集計対象外(窓の縁に近い)か、紐の上です';}
+  }else if(state.mode==='loops'){
+    const tol=Math.max(0.12,(0.13*sc/2+4)/sc);
+    let bi=-1,bd=1e9;
+    world.chords.forEach((c,i)=>{const d=distSeg(wx,wy,c.a,c.b);if(d<bd){bd=d;bi=i;}});
+    if(bd<=tol){
+      selLoop=world.lid[bi];
+      const lp=world.loops[selLoop];
+      if(!lp.closed){
+        el.textContent='選択した紐: 窓の外へ続く(表示範囲では閉じていない)・線分'+lp.n+'本';
+      }else if(lp.wind[0]!==0||lp.wind[1]!==0){
+        el.textContent='選択した紐: トーラスを ('+lp.wind[0]+', '+lp.wind[1]+') 周回する非可縮ループ・線分'+lp.n+'本(面積は定義不能)';
+      }else{
+        el.textContent='選択した紐: 閉ループ・線分'+lp.n+'本・符号付き面積 '+lp.sunits+'単位(= 3単位 × '+(lp.sunits/3)+')';
+      }
+    }else{
+      selLoop=null;el.textContent=pickDefault();
+    }
+    draw();
+  }
+});
+window.addEventListener('resize',()=>{if(world){draw();drawHist();}});
+rebuild();
+</script>
+</body>
+</html>
